@@ -1,6 +1,18 @@
 # Change Log
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+**:bug: Bug fixes**
+- *PDF*: The generic COS traversal now dereferences indirect objects, detects reference cycles and
+  shares a single sanitization budget with action handling and embedded file recursion, so payloads
+  hidden in the Catalog, annotations or nested attachments can no longer bypass the bleach
+- *PDF*: Only dangerous semantics (JavaScript, Launch, SubmitForm, ImportData, Rendition,
+  Sound/Movie and `file:` URIs), including their `Next` chains, are removed; plain links,
+  destinations and legitimate form actions such as ResetForm keep working
+- *PDF*: Embedded files referenced from file attachment annotations, action dictionaries and
+  related-file (`RF`) entries are recursively sanitized like the document name tree
+
 ## [0.0.8] - 2017-06-16
 
 **:sparkles: New features**

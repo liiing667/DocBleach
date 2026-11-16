@@ -8,7 +8,10 @@ import static xyz.docbleach.api.BleachTestBase.assertThreatsFound;
 
 import java.lang.reflect.Method;
 import org.apache.pdfbox.pdmodel.interactive.action.PDAction;
+import org.apache.pdfbox.pdmodel.interactive.action.PDActionLaunch;
 import org.apache.pdfbox.pdmodel.interactive.action.PDActionJavaScript;
+import org.apache.pdfbox.pdmodel.interactive.action.PDActionResetForm;
+import org.apache.pdfbox.pdmodel.interactive.action.PDActionURI;
 import org.apache.pdfbox.pdmodel.interactive.action.PDAnnotationAdditionalActions;
 import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotationLink;
 import org.apache.pdfbox.pdmodel.interactive.annotation.PDAnnotationWidget;
@@ -44,6 +47,37 @@ class PDAnnotationBleachTest {
   }
 
   @Test
+  void sanitizeAnnotationLinkKeepsInnocuousUri() {
+    PDAnnotationLink annotationLink = new PDAnnotationLink();
+    PDActionURI uriAction = new PDActionURI();
+    uriAction.setURI("https://example.org/safe");
+    annotationLink.setAction(uriAction);
+
+    instance.sanitizeLinkAnnotation(annotationLink);
+
+    assertThreatsFound(session, 0);
+    assertNotNull(annotationLink.getAction());
+  }
+
+  @Test
+  void sanitizeAnnotationLinkRemovesLaunchAndFileUri() {
+    PDAnnotationLink launchLink = new PDAnnotationLink();
+    launchLink.setAction(new PDActionLaunch());
+    instance.sanitizeLinkAnnotation(launchLink);
+    assertThreatsFound(session, 1);
+    assertNull(launchLink.getAction());
+    reset(session);
+
+    PDAnnotationLink fileLink = new PDAnnotationLink();
+    PDActionURI fileUri = new PDActionURI();
+    fileUri.setURI("file:///etc/passwd");
+    fileLink.setAction(fileUri);
+    instance.sanitizeLinkAnnotation(fileLink);
+    assertThreatsFound(session, 1);
+    assertNull(fileLink.getAction());
+  }
+
+  @Test
   void sanitizeAnnotationWidgetAction() {
     PDAnnotationWidget annotationWidget = new PDAnnotationWidget();
     annotationWidget.setAction(new PDActionJavaScript());
@@ -56,6 +90,17 @@ class PDAnnotationBleachTest {
 
     instance.sanitizeWidgetAnnotation(annotationWidget);
     assertThreatsFound(session, 0);
+  }
+
+  @Test
+  void sanitizeAnnotationWidgetKeepsInnocuousAction() {
+    PDAnnotationWidget annotationWidget = new PDAnnotationWidget();
+    annotationWidget.setAction(new PDActionResetForm());
+
+    instance.sanitizeWidgetAnnotation(annotationWidget);
+
+    assertThreatsFound(session, 0);
+    assertNotNull(annotationWidget.getAction());
   }
 
   @Test

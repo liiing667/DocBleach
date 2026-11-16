@@ -1,5 +1,6 @@
 package xyz.docbleach.module.pdf;
 
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
@@ -11,7 +12,10 @@ import static xyz.docbleach.api.BleachTestBase.assertThreatsFound;
 
 import java.io.IOException;
 import org.apache.pdfbox.pdmodel.PDDocumentCatalog;
+import org.apache.pdfbox.pdmodel.interactive.action.PDAction;
+import org.apache.pdfbox.pdmodel.interactive.action.PDActionLaunch;
 import org.apache.pdfbox.pdmodel.interactive.action.PDActionJavaScript;
+import org.apache.pdfbox.pdmodel.interactive.action.PDActionResetForm;
 import org.apache.pdfbox.pdmodel.interactive.action.PDDocumentCatalogAdditionalActions;
 import org.apache.pdfbox.pdmodel.interactive.action.PDFormFieldAdditionalActions;
 import org.apache.pdfbox.pdmodel.interactive.action.PDPageAdditionalActions;
@@ -74,6 +78,17 @@ class PDDocumentCatalogBleachTest {
   }
 
   @Test
+  void sanitizePageActionsKeepsInnocuousActions() {
+    PDPageAdditionalActions actions = new PDPageAdditionalActions();
+    actions.setO(new PDActionResetForm());
+
+    instance.sanitizePageActions(actions);
+
+    assertThreatsFound(session, 0);
+    assertNotNull(actions.getO());
+  }
+
+  @Test
   void sanitizeAdditionalActions() {
     PDDocumentCatalogAdditionalActions documentCatalogAdditionalActions =
         new PDDocumentCatalogAdditionalActions();
@@ -99,6 +114,22 @@ class PDDocumentCatalogBleachTest {
   }
 
   @Test
+  void sanitizeAdditionalActionsRemovesLaunchOnly() {
+    PDDocumentCatalogAdditionalActions documentActions =
+        new PDDocumentCatalogAdditionalActions();
+    PDAction launchAction = new PDActionLaunch();
+    PDAction resetAction = new PDActionResetForm();
+    documentActions.setWC(launchAction);
+    documentActions.setWS(resetAction);
+
+    instance.sanitizeDocumentActions(documentActions);
+
+    assertThreatsFound(session, 1);
+    assertNull(documentActions.getWC());
+    assertNotNull(documentActions.getWS());
+  }
+
+  @Test
   void sanitizeOpenAction() throws IOException {
     PDDocumentCatalog documentCatalog = mock(PDDocumentCatalog.class);
 
@@ -117,6 +148,18 @@ class PDDocumentCatalogBleachTest {
     verify(documentCatalog, atLeastOnce()).getOpenAction();
     verify(documentCatalog, never()).setOpenAction(null);
 
+    assertThreatsFound(session, 0);
+  }
+
+  @Test
+  void sanitizeOpenActionKeepsInnocuousAction() throws IOException {
+    PDDocumentCatalog documentCatalog = mock(PDDocumentCatalog.class);
+    PDActionResetForm innocuousAction = new PDActionResetForm();
+
+    when(documentCatalog.getOpenAction()).thenReturn(innocuousAction);
+    instance.sanitizeOpenAction(documentCatalog);
+
+    verify(documentCatalog, never()).setOpenAction(null);
     assertThreatsFound(session, 0);
   }
 }

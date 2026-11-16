@@ -3,6 +3,11 @@ package xyz.docbleach.module.pdf;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.Set;
+import org.apache.pdfbox.cos.COSDictionary;
+import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.io.MemoryUsageSetting;
 import org.apache.pdfbox.io.RandomAccessRead;
 import org.apache.pdfbox.io.ScratchFile;
@@ -12,6 +17,7 @@ import org.apache.pdfbox.pdmodel.PDDocumentCatalog;
 import org.apache.pdfbox.pdmodel.PDDocumentNameDictionary;
 import org.apache.pdfbox.pdmodel.encryption.InvalidPasswordException;
 import org.apache.pdfbox.pdmodel.encryption.StandardProtectionPolicy;
+import org.apache.pdfbox.pdmodel.interactive.action.PDAction;
 import org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDDocumentOutline;
 import org.apache.pdfbox.pdmodel.interactive.documentnavigation.outline.PDOutlineItem;
 import org.slf4j.Logger;
@@ -32,11 +38,19 @@ class PdfBleachSession {
       MemoryUsageSetting.setupMixed(1024 * 100);
 
   private final BleachSession session;
+  private final SanitizationBudget budget;
+  private final Set<COSDictionary> reportedActionDictionaries =
+      Collections.newSetFromMap(new IdentityHashMap<COSDictionary, Boolean>());
   private final COSObjectBleach cosObjectBleach;
+  private final PDActionBleach actionBleach;
+  private final PDEmbeddedFileBleach embeddedFileBleach;
 
   PdfBleachSession(BleachSession session) {
     this.session = session;
-    cosObjectBleach = new COSObjectBleach(this);
+    this.budget = new SanitizationBudget();
+    this.actionBleach = new PDActionBleach(this);
+    this.embeddedFileBleach = new PDEmbeddedFileBleach(this);
+    this.cosObjectBleach = new COSObjectBleach(this, actionBleach, embeddedFileBleach);
   }
 
   void sanitize(RandomAccessRead source, OutputStream outputStream)
@@ -45,12 +59,27 @@ class PdfBleachSession {
 
     final PDDocumentCatalog docCatalog = doc.getDocumentCatalog();
 
-    sanitizeNamed(doc, docCatalog.getNames());
+    embeddedFileBleach.registerDocument(doc);
+    sanitizeNamed(docCatalog.getNames());
     PDDocumentCatalogBleach catalogBleach = new PDDocumentCatalogBleach(this);
     catalogBleach.sanitize(docCatalog);
     sanitizeDocumentOutline(doc.getDocumentCatalog().getDocumentOutline());
 
     cosObjectBleach.sanitizeObjects(doc.getDocument().getObjects());
+
+    if (budget.isExhausted()) {
+      LOGGER.warn(
+          "Sanitization budget exhausted (objects: {}, depth: {}, embedded files: {}); "
+              + "remaining unreachable content was not inspected",
+          budget.getTraversedObjects(),
+          budget.getMaxDepthReached(),
+          budget.getEmbeddedFiles());
+      recordThreat(
+          ThreatType.UNRECOGNIZED_CONTENT,
+          ThreatSeverity.HIGH,
+          "PDF Document",
+          "Sanitization budget exhausted, uninspected content dropped");
+    }
 
     doc.save(outputStream);
     doc.close();
@@ -64,23 +93,28 @@ class PdfBleachSession {
   }
 
   private void sanitizeDocumentOutlineItem(PDOutlineItem item) {
-    if (item.getAction() == null) {
+    PDAction action = item.getAction();
+    if (action == null) {
       return;
     }
-    LOGGER.debug("Found&removed action on outline item (was {})", item.getAction());
-    item.setAction(null);
-    recordJavascriptThreat("DocumentOutline Item Action", "Action");
+    if (actionBleach.sanitizeAction(action, "Document Outline Item") == null) {
+      LOGGER.debug("Found&removed dangerous action on outline item (was {})", action);
+      item.setAction(null);
+    } else {
+      LOGGER.trace("Keeping innocuous action on outline item ({})", action);
+    }
   }
 
-  private void sanitizeNamed(PDDocument doc, PDDocumentNameDictionary names) {
+  private void sanitizeNamed(PDDocumentNameDictionary names) {
     if (names == null) {
       return;
     }
 
-    new PDEmbeddedFileBleach(this, doc).sanitize(names.getEmbeddedFiles());
+    embeddedFileBleach.sanitize(names.getEmbeddedFiles());
 
     if (names.getJavaScript() != null) {
-      recordJavascriptThreat("Named JavaScriptAction", "Action");
+      recordThreat(
+          ThreatType.ACTIVE_CONTENT, ThreatSeverity.HIGH, "Name Dictionary", "Named JavaScript");
       names.setJavascript(null);
     }
   }
@@ -121,9 +155,48 @@ class PdfBleachSession {
   }
 
   void recordJavascriptThreat(String location, String details) {
+    recordThreat(ThreatType.ACTIVE_CONTENT, ThreatSeverity.HIGH, location, details);
+  }
+
+  void recordActionThreat(String location, PDAction action) {
+    markActionThreatReported(action.getCOSObject());
+    recordActionThreat(location, action.getCOSObject());
+  }
+
+  void recordActionThreat(String location, COSDictionary actionDictionary) {
+    markActionThreatReported(actionDictionary);
+    String subtype = actionDictionary.getNameAsString(COSName.S);
+    recordThreat(
+        ThreatType.ACTIVE_CONTENT,
+        ThreatSeverity.HIGH,
+        location,
+        "Dangerous action removed: " + subtype);
+  }
+
+  /**
+   * Records an action threat found by the generic COS object backstop. Actions already reported by
+   * the high level catalog/annotation passes are not reported a second time.
+   */
+  void recordBackstopActionThreat(String location, COSDictionary actionDictionary) {
+    if (!reportedActionDictionaries.add(actionDictionary)) {
+      return;
+    }
+    recordActionThreat(location, actionDictionary);
+  }
+
+  void markActionThreatReported(COSDictionary actionDictionary) {
+    reportedActionDictionaries.add(actionDictionary);
+  }
+
+  void recordEmbeddedFileThreat(String location, String details, ThreatSeverity severity) {
+    recordThreat(ThreatType.BINARY_CONTENT, severity, location, details);
+  }
+
+  void recordThreat(
+      ThreatType type, ThreatSeverity severity, String location, String details) {
     Threat threat = Threat.builder()
-        .type(ThreatType.ACTIVE_CONTENT)
-        .severity(ThreatSeverity.HIGH)
+        .type(type)
+        .severity(severity)
         .details(details)
         .location(location)
         .action(ThreatAction.REMOVE)
@@ -134,5 +207,17 @@ class PdfBleachSession {
 
   BleachSession getSession() {
     return session;
+  }
+
+  SanitizationBudget getBudget() {
+    return budget;
+  }
+
+  PDActionBleach getActionBleach() {
+    return actionBleach;
+  }
+
+  PDEmbeddedFileBleach getEmbeddedFileBleach() {
+    return embeddedFileBleach;
   }
 }
