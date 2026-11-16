@@ -11,6 +11,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.PrintWriter;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
 import org.apache.commons.cli.DefaultParser;
@@ -34,6 +38,7 @@ public class Main {
   private int verbosityLevel = 0;
   private InputStream inputStream;
   private OutputStream outputStream;
+  private File outputFile;
   private boolean jsonOutput;
 
   private Main() {
@@ -76,21 +81,43 @@ public class Main {
    * Sanitizes the designated files
    */
   private void sanitize() throws BleachException {
-    BleachSession session = new BleachSession(new DefaultBleach());
-
-    session.sanitize(inputStream, outputStream);
-
-    if (jsonOutput) {
-      Gson gson = new Gson();
-      System.err.println(gson.toJson(session));
-    } else {
-      if (session.threatCount() == 0) {
-        LOGGER.info("The file was already safe, so I've just copied it over.");
+    try (BleachSession session = new BleachSession(new DefaultBleach())) {
+      if (outputFile != null) {
+        // Sanitize in the session's private temporary directory, and only expose the
+        // result once it is complete: no half-written file is ever visible at the
+        // destination, and a failure leaves nothing behind.
+        Path temporaryOutput = session.createTempFile("docbleach-out-", ".tmp");
+        try (OutputStream os = new FileOutputStream(temporaryOutput.toFile())) {
+          session.sanitize(inputStream, os);
+        }
+        moveIntoPlace(temporaryOutput, outputFile.toPath());
       } else {
-        LOGGER.warn(
-            "Sanitized file has been saved, {} potential threat(s) removed.",
-            session.threatCount());
+        session.sanitize(inputStream, outputStream);
       }
+
+      if (jsonOutput) {
+        Gson gson = new Gson();
+        System.err.println(gson.toJson(session));
+      } else {
+        if (session.threatCount() == 0) {
+          LOGGER.info("The file was already safe, so I've just copied it over.");
+        } else {
+          LOGGER.warn(
+              "Sanitized file has been saved, {} potential threat(s) removed.",
+              session.threatCount());
+        }
+      }
+    } catch (IOException e) {
+      throw new BleachException(e);
+    }
+  }
+
+  private static void moveIntoPlace(Path source, Path target) throws IOException {
+    try {
+      Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
+    } catch (AtomicMoveNotSupportedException e) {
+      // The temporary directory and the target live on different file systems
+      Files.move(source, target);
     }
   }
 
@@ -207,11 +234,8 @@ public class Main {
     if (outFile.exists()) {
       throw new IOException("Output file already exists. Quitting");
     }
-    if (!outFile.createNewFile()) {
-      throw new IOException("Output file could not be written to. Quitting.");
-    }
 
-    outputStream = new FileOutputStream(outFile);
+    outputFile = outFile;
   }
 
   private InputStream getFileInputStream(File inFile) throws FileNotFoundException {

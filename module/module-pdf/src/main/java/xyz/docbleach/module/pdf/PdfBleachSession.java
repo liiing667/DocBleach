@@ -3,6 +3,7 @@ package xyz.docbleach.module.pdf;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.file.Path;
 import org.apache.pdfbox.io.MemoryUsageSetting;
 import org.apache.pdfbox.io.RandomAccessRead;
 import org.apache.pdfbox.io.ScratchFile;
@@ -28,8 +29,6 @@ class PdfBleachSession {
   private static final Logger LOGGER = LoggerFactory.getLogger(PdfBleachSession.class);
   private static final String[] COMMON_PASSWORDS =
       new String[]{null, "", "test", "example", "sample", "malware", "infected", "password"};
-  private static final MemoryUsageSetting MEMORY_USAGE_SETTING =
-      MemoryUsageSetting.setupMixed(1024 * 100);
 
   private final BleachSession session;
   private final COSObjectBleach cosObjectBleach;
@@ -88,7 +87,7 @@ class PdfBleachSession {
   private PDDocument getDocument(RandomAccessRead source) throws IOException, BleachException {
     PDDocument doc;
     for (String pwd : COMMON_PASSWORDS) {
-      ScratchFile scratchFile = new ScratchFile(MEMORY_USAGE_SETTING);
+      ScratchFile scratchFile = new ScratchFile(memoryUsageSetting());
       doc = testPassword(scratchFile, source, pwd);
       if (doc != null) {
         LOGGER.debug("Password was guessed: '{}'", pwd);
@@ -101,6 +100,19 @@ class PdfBleachSession {
     // @TODO: fetch password from config?
 
     throw new BleachException("PDF is protected with an unknown password");
+  }
+
+  /**
+   * Scratch files may contain the document's plain text: they are stored in the session's
+   * private temporary directory, so they are removed when the session ends.
+   */
+  private MemoryUsageSetting memoryUsageSetting() throws BleachException {
+    MemoryUsageSetting setting = MemoryUsageSetting.setupMixed(1024 * 100);
+    Path tempDirectory = session.getTempDirectory();
+    if (tempDirectory != null) {
+      setting.setTempDir(tempDirectory.toFile());
+    }
+    return setting;
   }
 
   @SuppressFBWarnings(
