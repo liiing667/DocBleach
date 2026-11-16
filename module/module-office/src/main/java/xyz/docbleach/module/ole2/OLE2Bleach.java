@@ -5,7 +5,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.util.function.Predicate;
+import java.util.Iterator;
 import org.apache.poi.hpsf.ClassID;
 import org.apache.poi.poifs.filesystem.DirectoryEntry;
 import org.apache.poi.poifs.filesystem.DocumentEntry;
@@ -18,12 +18,14 @@ import org.slf4j.LoggerFactory;
 import xyz.docbleach.api.BleachSession;
 import xyz.docbleach.api.bleach.Bleach;
 import xyz.docbleach.api.exception.BleachException;
+import xyz.docbleach.module.ole2.Ole2BleachException.Category;
 
 /**
  * Sanitizes an OLE2 file (.doc, .xls, .ppt) by copying its elements into a new OLE2 container.
  * Information to be modified (template, ...) are changed on the fly, and entries to be removed are
- * just not copied over. This way, using a simple Visitor, it is possible to add rules applied on
- * each entry.
+ * just not copied over. The retention decisions are centralized in a single {@link
+ * EntryRetentionPolicy}, shared by every removal path, and any failure aborts the sanitation with
+ * a classified exception before anything is written to the output stream.
  */
 public class OLE2Bleach implements Bleach {
 
@@ -47,86 +49,109 @@ public class OLE2Bleach implements Bleach {
   @Override
   public void sanitize(InputStream inputStream, OutputStream outputStream, BleachSession session)
       throws BleachException {
-    try (POIFSFileSystem fsIn = new POIFSFileSystem(inputStream);
+    try (POIFSFileSystem fsIn = openInput(inputStream);
         POIFSFileSystem fs = new POIFSFileSystem()) {
       // @TODO: Filter based on Storage Class ID - see issue #23
-      sanitize(session, fsIn, fs);
+      EntryRetentionPolicy policy = new EntryRetentionPolicy(session);
+      sanitize(session, policy, fsIn, fs);
 
-      if (ClassID.EXCEL97.equals(fs.getRoot().getStorageClsid())) {
-        ExcelRecordCleaner.cleanupAndSaveExcel97(fs, outputStream);
-      } else {
-        fs.writeFilesystem(outputStream);
-      }
+      // The sanitized file is built in memory first: if anything fails, a classified exception
+      // is thrown and no partial output is left behind.
+      ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+      writeSanitizedFilesystem(fs, buffer, policy);
+      buffer.writeTo(outputStream);
     } catch (IOException | IndexOutOfBoundsException e) {
-      throw new BleachException(e);
+      throw new Ole2BleachException(Category.INPUT_READ, e);
     }
   }
 
-  protected void sanitize(BleachSession session, POIFSFileSystem fsIn, POIFSFileSystem fs) {
+  private POIFSFileSystem openInput(InputStream inputStream) throws Ole2BleachException {
+    try {
+      return new POIFSFileSystem(inputStream);
+    } catch (IOException | RuntimeException e) {
+      throw new Ole2BleachException(Category.INPUT_READ, e);
+    }
+  }
+
+  private void writeSanitizedFilesystem(
+      POIFSFileSystem fs, OutputStream out, EntryRetentionPolicy policy)
+      throws Ole2BleachException {
+    if (ClassID.EXCEL97.equals(fs.getRoot().getStorageClsid())) {
+      try {
+        ExcelRecordCleaner.cleanupAndSaveExcel97(fs, out, policy);
+      } catch (IOException | RuntimeException e) {
+        throw new Ole2BleachException(Category.RECORD_CLEANUP, e);
+      }
+      return;
+    }
+
+    try {
+      fs.writeFilesystem(out);
+    } catch (IOException | RuntimeException e) {
+      throw new Ole2BleachException(Category.OUTPUT_WRITE, e);
+    }
+  }
+
+  protected void sanitize(
+      BleachSession session, EntryRetentionPolicy policy, POIFSFileSystem fsIn, POIFSFileSystem fs)
+      throws Ole2BleachException {
     DirectoryEntry rootIn = fsIn.getRoot();
     DirectoryEntry rootOut = fs.getRoot();
 
-    sanitize(session, rootIn, rootOut);
-  }
-
-  protected void sanitize(BleachSession session, DirectoryEntry rootIn, DirectoryEntry rootOut) {
-    LOGGER.debug("Entries before: {}", rootIn.getEntryNames());
-    // Save the changes to a new file
-
-    // Returns false if the entry should be removed
-    Predicate<Entry> visitor =
-        ((Predicate<Entry>) (e -> true))
-            .and(new MacroRemover(session))
-            .and(new ObjectRemover(session))
-            .and(new SummaryInformationSanitiser(session));
-
-    LOGGER.debug("Root ClassID: {}", rootIn.getStorageClsid());
     // https://blogs.msdn.microsoft.com/heaths/2006/02/27/identifying-windows-installer-file-types/
     rootOut.setStorageClsid(rootIn.getStorageClsid());
 
-    rootIn
-        .getEntries()
-        .forEachRemaining(
-            entry -> {
-              if (!visitor.test(entry)) {
-                return;
-              }
-              copyNodesRecursively(session, entry, rootOut);
-            });
-
-    LOGGER.debug("Entries after: {}", rootOut.getEntryNames());
-    // Save the changes to a new file
+    sanitize(session, policy, rootIn, rootOut);
   }
 
-  protected void copyNodesRecursively(BleachSession session, Entry entry, DirectoryEntry target) {
-    LOGGER.trace("copyNodesRecursively: {}, parent: {}", entry.getName(), entry.getParent());
-    try {
-      if (!entry.isDirectoryEntry()) {
-        DocumentEntry dentry = (DocumentEntry) entry;
-        DocumentInputStream dstream = new DocumentInputStream(dentry);
-        ByteArrayOutputStream os = new ByteArrayOutputStream();
+  protected void sanitize(
+      BleachSession session,
+      EntryRetentionPolicy policy,
+      DirectoryEntry rootIn,
+      DirectoryEntry rootOut)
+      throws Ole2BleachException {
+    LOGGER.debug("Entries before: {}", rootIn.getEntryNames());
 
-        try {
-          session.sanitize(dstream, os);
-        } catch (BleachException e) {
-          LOGGER.error("An error occured", e);
-          return;
-        }
-
-        ByteArrayInputStream bais = new ByteArrayInputStream(os.toByteArray());
-
-        target.createDocument(dentry.getName(), bais);
-        dstream.close();
-        return;
+    Iterator<Entry> entries = rootIn.getEntries();
+    while (entries.hasNext()) {
+      Entry entry = entries.next();
+      if (!policy.isKept(entry)) {
+        continue;
       }
+      copyNodesRecursively(session, policy, entry, rootOut);
+    }
+    LOGGER.debug("Entries after: {}", rootOut.getEntryNames());
+  }
 
-      DirectoryEntry dirEntry = (DirectoryEntry) entry;
+  protected void copyNodesRecursively(
+      BleachSession session, EntryRetentionPolicy policy, Entry entry, DirectoryEntry target)
+      throws Ole2BleachException {
+    LOGGER.trace("copyNodesRecursively: {}, parent: {}", entry.getName(), entry.getParent());
+    if (!entry.isDirectoryEntry()) {
+      DocumentEntry dentry = (DocumentEntry) entry;
+      try (DocumentInputStream dstream = new DocumentInputStream(dentry)) {
+        ByteArrayOutputStream os = new ByteArrayOutputStream();
+        session.sanitize(dstream, os);
+        ByteArrayInputStream bais = new ByteArrayInputStream(os.toByteArray());
+        target.createDocument(dentry.getName(), bais);
+      } catch (BleachException e) {
+        throw new Ole2BleachException(
+            Category.CONTENT_SANITIZE, "Failed to sanitize the entry " + entry.getName(), e);
+      } catch (IOException e) {
+        throw new Ole2BleachException(
+            Category.ENTRY_COPY, "Failed to copy the entry " + entry.getName(), e);
+      }
+      return;
+    }
+
+    DirectoryEntry dirEntry = (DirectoryEntry) entry;
+    try {
       DirectoryEntry newTarget = target.createDirectory(entry.getName());
       newTarget.setStorageClsid(dirEntry.getStorageClsid());
-
-      sanitize(session, dirEntry, newTarget);
+      sanitize(session, policy, dirEntry, newTarget);
     } catch (IOException e) {
-      LOGGER.error("An error occured while trying to recursively copy nodes", e);
+      throw new Ole2BleachException(
+          Category.ENTRY_COPY, "Failed to copy the storage " + entry.getName(), e);
     }
   }
 }

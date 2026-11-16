@@ -13,4 +13,8 @@ public class BleachException extends Exception {
   public BleachException(String message) {
     super(message);
   }
+
+  public BleachException(String message, Throwable cause) {
+    super(message, cause);
+  }
 }

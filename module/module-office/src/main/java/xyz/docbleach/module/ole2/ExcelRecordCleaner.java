@@ -23,14 +23,21 @@ public class ExcelRecordCleaner {
    */
   private static final short OB_PROJ_SID = 0xD3;
 
-  protected static void cleanupAndSaveExcel97(POIFSFileSystem fs, OutputStream outputStream)
+  /**
+   * Removes the records pointing to storages that the retention policy removed (eg. the ObProj
+   * record, which references the VBA storage), then writes the workbook. The policy is the single
+   * source of truth: a record is only dropped when its target is no longer part of the sanitized
+   * file.
+   */
+  protected static void cleanupAndSaveExcel97(
+      POIFSFileSystem fs, OutputStream outputStream, EntryRetentionPolicy policy)
       throws IOException {
     Workbook wb = WorkbookFactory.create(fs);
 
     if (wb instanceof HSSFWorkbook) {
       HSSFWorkbook hwb = (HSSFWorkbook) wb;
       InternalWorkbook internal = hwb.getInternalWorkbook();
-      if (internal != null) {
+      if (internal != null && isVbaStorageRemoved(fs, policy)) {
         LOGGER.trace("# of Records: {}", internal.getNumRecords());
         removeObProjRecord(internal.getRecords());
         LOGGER.trace("# of Records: {}", internal.getNumRecords());
@@ -38,6 +45,15 @@ public class ExcelRecordCleaner {
     }
 
     wb.write(outputStream);
+  }
+
+  /**
+   * The ObProj record points to the VBA storage: it must be removed when the policy rejected this
+   * storage, or when the sanitized file no longer contains it.
+   */
+  private static boolean isVbaStorageRemoved(POIFSFileSystem fs, EntryRetentionPolicy policy) {
+    return policy.wasRemoved(MacroRemover.VBA_ENTRY)
+        || !fs.getRoot().hasEntry(MacroRemover.VBA_ENTRY);
   }
 
   protected static void removeObProjRecord(Collection<Record> records) {

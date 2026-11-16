@@ -15,7 +15,7 @@ import xyz.docbleach.api.threat.ThreatType;
 public class MacroRemover extends EntryFilter {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(MacroRemover.class);
-  private static final String VBA_ENTRY = "VBA";
+  static final String VBA_ENTRY = "VBA";
   private static final String MACRO_ENTRY = "Macros";
 
   public MacroRemover(BleachSession session) {
