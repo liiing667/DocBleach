@@ -131,6 +131,10 @@
       <plugin>
         <artifactId>maven-surefire-plugin</artifactId>
         <version>2.22.2</version>
+        <configuration>
+          <!-- Mockito 1.x / cglib used by the tests needs reflective access on modern JDKs -->
+          <argLine>--add-opens java.base/java.lang=ALL-UNNAMED</argLine>
+        </configuration>
       </plugin>
     </plugins>
 

@@ -22,5 +22,11 @@ public enum ThreatType {
   /**
    * OLE Objects, strange image in a document ...
    */
-  UNRECOGNIZED_CONTENT
+  UNRECOGNIZED_CONTENT,
+
+  /**
+   * Compression bombs, deeply nested documents or any input exhausting the shared resource
+   * budget (decompressed size, entry count, recursion depth or processing time)
+   */
+  RESOURCE_LIMIT
 }

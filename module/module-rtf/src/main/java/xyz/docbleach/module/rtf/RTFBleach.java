@@ -11,6 +11,7 @@ import java.nio.charset.Charset;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import xyz.docbleach.api.BleachSession;
+import xyz.docbleach.api.budget.BudgetIOException;
 import xyz.docbleach.api.bleach.Bleach;
 import xyz.docbleach.api.exception.BleachException;
 import xyz.docbleach.api.threat.Threat;
@@ -18,6 +19,7 @@ import xyz.docbleach.api.threat.ThreatAction;
 import xyz.docbleach.api.threat.ThreatSeverity;
 import xyz.docbleach.api.threat.ThreatType;
 import xyz.docbleach.api.util.StreamUtils;
+import xyz.docbleach.api.util.BudgetedInputStream;
 
 /**
  * RTF files are not that common nowadays, but it is a simple format and is a perfect bleach
@@ -52,11 +54,16 @@ public class RTFBleach implements Bleach {
     LOGGER.debug("This is a RTF file, I'll rename object to 0bject, and hope for it to be enough.");
 
     Charset cs = Charset.isSupported("UTF-8") ? Charset.forName("UTF-8") : Charset.defaultCharset();
+    session.pushBudgetLayer("rtf");
 
-    try (BufferedReader inStream = new BufferedReader(new InputStreamReader(inputStream, cs));
+    try (BufferedReader inStream =
+            new BufferedReader(
+                new InputStreamReader(
+                    new BudgetedInputStream(inputStream, session.getBudget()), cs));
         BufferedWriter outStream = new BufferedWriter(new OutputStreamWriter(outFile, cs));) {
       String l;
       while ((l = inStream.readLine()) != null) {
+        session.checkBudgetTime();
         if (l.toLowerCase().contains("\\obj")) {
           LOGGER.debug("OLE Object found and removed!");
 
@@ -74,7 +81,10 @@ public class RTFBleach implements Bleach {
         outStream.write(sanitizedLine);
       }
     } catch (IOException e) {
+      BudgetIOException.rethrowIfBudget(e);
       throw new BleachException(e);
+    } finally {
+      session.popBudgetLayer();
     }
   }
 

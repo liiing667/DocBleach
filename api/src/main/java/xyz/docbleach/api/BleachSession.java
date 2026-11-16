@@ -7,10 +7,12 @@ import java.util.ArrayList;
 import java.util.Collection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import xyz.docbleach.api.budget.ResourceBudget;
+import xyz.docbleach.api.budget.ResourceBudgetExceededException;
 import xyz.docbleach.api.bleach.Bleach;
 import xyz.docbleach.api.exception.BleachException;
-import xyz.docbleach.api.exception.RecursionBleachException;
 import xyz.docbleach.api.threat.Threat;
+import xyz.docbleach.api.util.StreamUtils;
 
 /**
  * A Bleach Session handles the data a bleach needs to store: list of the threats removed, for
@@ -20,16 +22,22 @@ import xyz.docbleach.api.threat.Threat;
 public class BleachSession implements Serializable {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(BleachSession.class);
-  private static final int MAX_ONGOING_TASKS = 10;
   private final transient Bleach bleach;
   private final Collection<Threat> threats = new ArrayList<>();
   /**
-   * Counts ongoing tasks, to prevent fork bombs when handling zip archives for instance)
+   * Shared resource budget of the whole sanitation chain. Transient: a budget is only meaningful
+   * for the lifetime of a sanitation, and its counters / layer stack are not serializable state.
    */
-  private int ongoingTasks = 0;
+  private final transient ResourceBudget budget;
 
   public BleachSession(Bleach bleach) {
     this.bleach = bleach;
+    this.budget = new ResourceBudget(this::recordThreat);
+  }
+
+  public BleachSession(Bleach bleach, ResourceBudget budget) {
+    this.bleach = bleach;
+    this.budget = budget;
   }
 
   /**
@@ -60,17 +68,44 @@ public class BleachSession implements Serializable {
     return bleach;
   }
 
+  /**
+   * @return the resource budget shared by every bleach of this session's sanitation chain
+   */
+  public ResourceBudget getBudget() {
+    return budget;
+  }
+
+  public void pushBudgetLayer(String layer) throws ResourceBudgetExceededException {
+    budget.pushLayer(layer);
+  }
+
+  public void popBudgetLayer() {
+    budget.popLayer();
+  }
+
+  public void accountBudgetedBytes(long bytes) throws ResourceBudgetExceededException {
+    budget.accountBytes(bytes);
+  }
+
+  public void accountBudgetedEntry() throws ResourceBudgetExceededException {
+    budget.accountEntry();
+  }
+
+  public void checkBudgetTime() throws ResourceBudgetExceededException {
+    budget.checkTime();
+  }
+
   public void sanitize(InputStream is, OutputStream os) throws BleachException {
-    try {
-      if (ongoingTasks++ >= MAX_ONGOING_TASKS) {
-        throw new RecursionBleachException(ongoingTasks);
+    if (!bleach.handlesMagic(is)) {
+      // No bleach can handle this content: pass it through untouched instead of dropping it,
+      // otherwise ordinary entries of nested containers would silently come out empty.
+      try {
+        StreamUtils.copy(is, os);
+      } catch (java.io.IOException e) {
+        throw new BleachException(e);
       }
-      if (!bleach.handlesMagic(is)) {
-        return;
-      }
-      bleach.sanitize(is, os, this);
-    } finally {
-      ongoingTasks--;
+      return;
     }
+    bleach.sanitize(is, os, this);
   }
 }

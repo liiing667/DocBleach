@@ -14,6 +14,9 @@ import org.apache.pdfbox.pdmodel.common.filespecification.PDComplexFileSpecifica
 import org.apache.pdfbox.pdmodel.common.filespecification.PDEmbeddedFile;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import xyz.docbleach.api.BleachSession;
+import xyz.docbleach.api.budget.BudgetAbortException;
+import xyz.docbleach.api.budget.ResourceBudgetExceededException;
 import xyz.docbleach.api.exception.BleachException;
 
 class PDEmbeddedFileBleach {
@@ -30,19 +33,31 @@ class PDEmbeddedFileBleach {
   private void sanitizeEmbeddedFile(PDComplexFileSpecification fileSpec) {
     LOGGER.trace("Embedded file found: {}", fileSpec.getFilename());
 
-    fileSpec.setEmbeddedFile(sanitizeEmbeddedFile(fileSpec.getEmbeddedFile()));
-    fileSpec.setEmbeddedFileDos(sanitizeEmbeddedFile(fileSpec.getEmbeddedFileDos()));
-    fileSpec.setEmbeddedFileMac(sanitizeEmbeddedFile(fileSpec.getEmbeddedFileMac()));
-    fileSpec.setEmbeddedFileUnicode(sanitizeEmbeddedFile(fileSpec.getEmbeddedFileUnicode()));
-    fileSpec.setEmbeddedFileUnix(sanitizeEmbeddedFile(fileSpec.getEmbeddedFileUnix()));
+    BleachSession session = pdfBleachSession.getSession();
+    try {
+      session.accountBudgetedEntry();
+      session.pushBudgetLayer("pdf-embedded:" + fileSpec.getFilename());
+      fileSpec.setEmbeddedFile(sanitizeEmbeddedFile(fileSpec.getEmbeddedFile()));
+      fileSpec.setEmbeddedFileDos(sanitizeEmbeddedFile(fileSpec.getEmbeddedFileDos()));
+      fileSpec.setEmbeddedFileMac(sanitizeEmbeddedFile(fileSpec.getEmbeddedFileMac()));
+      fileSpec.setEmbeddedFileUnicode(sanitizeEmbeddedFile(fileSpec.getEmbeddedFileUnicode()));
+      fileSpec.setEmbeddedFileUnix(sanitizeEmbeddedFile(fileSpec.getEmbeddedFileUnix()));
+    } catch (ResourceBudgetExceededException e) {
+      throw new BudgetAbortException(e);
+    } finally {
+      session.popBudgetLayer();
+    }
   }
 
-  private PDEmbeddedFile sanitizeEmbeddedFile(PDEmbeddedFile file) {
+  private PDEmbeddedFile sanitizeEmbeddedFile(PDEmbeddedFile file)
+      throws ResourceBudgetExceededException {
     if (file == null) {
       return null;
     }
 
     LOGGER.debug("Sanitizing file: Size: {}, Mime-Type: {}, ", file.getSize(), file.getSubtype());
+
+    pdfBleachSession.getSession().accountBudgetedBytes(file.getSize());
 
     ByteArrayInputStream is;
     try {
@@ -55,6 +70,8 @@ class PDEmbeddedFileBleach {
 
     try {
       pdfBleachSession.getSession().sanitize(is, os);
+    } catch (ResourceBudgetExceededException e) {
+      throw e;
     } catch (BleachException e) {
       LOGGER.error("Error during the bleach process", e);
       return null;

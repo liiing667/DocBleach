@@ -16,8 +16,12 @@ import org.apache.poi.poifs.filesystem.POIFSFileSystem;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import xyz.docbleach.api.BleachSession;
+import xyz.docbleach.api.budget.BudgetAbortException;
+import xyz.docbleach.api.budget.BudgetIOException;
+import xyz.docbleach.api.budget.ResourceBudgetExceededException;
 import xyz.docbleach.api.bleach.Bleach;
 import xyz.docbleach.api.exception.BleachException;
+import xyz.docbleach.api.util.BudgetedInputStream;
 
 /**
  * Sanitizes an OLE2 file (.doc, .xls, .ppt) by copying its elements into a new OLE2 container.
@@ -47,7 +51,9 @@ public class OLE2Bleach implements Bleach {
   @Override
   public void sanitize(InputStream inputStream, OutputStream outputStream, BleachSession session)
       throws BleachException {
-    try (POIFSFileSystem fsIn = new POIFSFileSystem(inputStream);
+    session.pushBudgetLayer("ole2");
+    try (POIFSFileSystem fsIn =
+            new POIFSFileSystem(new BudgetedInputStream(inputStream, session.getBudget()));
         POIFSFileSystem fs = new POIFSFileSystem()) {
       // @TODO: Filter based on Storage Class ID - see issue #23
       sanitize(session, fsIn, fs);
@@ -57,8 +63,15 @@ public class OLE2Bleach implements Bleach {
       } else {
         fs.writeFilesystem(outputStream);
       }
+    } catch (BudgetAbortException e) {
+      throw e.getBudgetException();
     } catch (IOException | IndexOutOfBoundsException e) {
+      if (e instanceof IOException) {
+        BudgetIOException.rethrowIfBudget((IOException) e);
+      }
       throw new BleachException(e);
+    } finally {
+      session.popBudgetLayer();
     }
   }
 
@@ -103,14 +116,25 @@ public class OLE2Bleach implements Bleach {
     try {
       if (!entry.isDirectoryEntry()) {
         DocumentEntry dentry = (DocumentEntry) entry;
+        try {
+          session.accountBudgetedEntry();
+          session.accountBudgetedBytes(dentry.getSize());
+          session.pushBudgetLayer("ole2-entry:" + dentry.getName());
+        } catch (ResourceBudgetExceededException e) {
+          throw new BudgetAbortException(e);
+        }
         DocumentInputStream dstream = new DocumentInputStream(dentry);
         ByteArrayOutputStream os = new ByteArrayOutputStream();
 
         try {
           session.sanitize(dstream, os);
+        } catch (ResourceBudgetExceededException e) {
+          throw new BudgetAbortException(e);
         } catch (BleachException e) {
           LOGGER.error("An error occured", e);
           return;
+        } finally {
+          session.popBudgetLayer();
         }
 
         ByteArrayInputStream bais = new ByteArrayInputStream(os.toByteArray());
