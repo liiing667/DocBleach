@@ -1,6 +1,18 @@
 # Change Log
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+**:sparkles: New features**
+- *API*: BleachSession owns a private, per-session temporary directory (`getTemporaryDirectory`, `createTempFile`)
+- *API*: Add `cancel()`/`close()` to BleachSession: cancellation is terminal and atomically destroys the session's resources; failed sanitations can be retried on a live session
+- *API*: Add a SessionCancelledException
+
+**:bug: Bug fixes**
+- *Server*: Write sanitized files inside the session's private directory and destroy them with the session; delete the uploaded plaintext when a sanitation fails
+- *PDF*: Keep PDFBox scratch files inside the session's private temporary directory
+- *Server*: Pin vertx-web to 3.9.16, the open-ended version range pulled an incompatible major version
+
 ## [0.0.8] - 2017-06-16
 
 **:sparkles: New features**

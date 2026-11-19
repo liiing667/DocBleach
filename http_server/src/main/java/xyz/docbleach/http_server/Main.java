@@ -1,6 +1,7 @@
 package xyz.docbleach.http_server;
 
 import io.vertx.core.AbstractVerticle;
+import io.vertx.core.AsyncResult;
 import io.vertx.core.Promise;
 import io.vertx.core.Handler;
 import io.vertx.core.http.HttpServer;
@@ -66,24 +67,37 @@ public class Main extends AbstractVerticle {
                 LOGGER.info("UploadedFileName: {}", upload.fileName());
 
                 vertx.executeBlocking(
-                    (Handler<Promise<File>>)
+                    (Handler<Promise<SanitizationResult>>)
                         promise -> {
-                          try {
-                            promise.complete(sanitize(upload.uploadedFileName()));
-                          } catch (IOException | BleachException e) {
-                            LOGGER.error("Error", e);
-                            promise.fail(e);
-                          }
-                        },
+                      BleachSession session = new BleachSession(new DefaultBleach());
+                      try {
+                        promise.complete(
+                            new SanitizationResult(
+                                session, sanitize(upload.uploadedFileName(), session)));
+                      } catch (IOException | BleachException e) {
+                        session.cancel();
+                        removeFiles(new File(upload.uploadedFileName()));
+                        LOGGER.error("Error", e);
+                        promise.fail(e);
+                      }
+                    },
                     res -> {
                       if (!res.succeeded()) {
                         routingContext.fail(res.cause());
                         return;
                       }
 
-                      final File saneFile = res.result();
-                      sendFile(routingContext, upload.fileName(), saneFile);
-                      removeFiles(new File(upload.uploadedFileName()), saneFile);
+                      final SanitizationResult result = res.result();
+                      sendFile(
+                          routingContext,
+                          upload.fileName(),
+                          result.getFile(),
+                          __ -> {
+                            removeFiles(new File(upload.uploadedFileName()));
+                            // Closing the session atomically destroys its private temporary
+                            // directory, including the sanitized file we just sent.
+                            result.getSession().close();
+                          });
                     });
 
                 return;
@@ -104,7 +118,11 @@ public class Main extends AbstractVerticle {
     server.requestHandler(router).listen(getPortNumber());
   }
 
-  private void sendFile(RoutingContext routingContext, String fileName, File saneFile) {
+  private void sendFile(
+      RoutingContext routingContext,
+      String fileName,
+      File saneFile,
+      Handler<AsyncResult<Void>> completionHandler) {
     HttpServerResponse response = routingContext.response();
     response.putHeader("Content-Description", "File Transfer");
     response.putHeader("Content-Type", "application/octet-stream");
@@ -116,7 +134,7 @@ public class Main extends AbstractVerticle {
     response.putHeader("Cache-Control", "must-revalidate, post-check=0, pre-check=0");
     response.putHeader("Content-Length", "" + saneFile.length());
 
-    response.sendFile(saneFile.getAbsolutePath());
+    response.sendFile(saneFile.getAbsolutePath(), completionHandler);
   }
 
   private void removeFiles(File... files) {
@@ -132,15 +150,12 @@ public class Main extends AbstractVerticle {
         });
   }
 
-  private File sanitize(String uploadedFileName) throws IOException, BleachException {
-    BleachSession session = new BleachSession(new DefaultBleach());
-
+  private File sanitize(String uploadedFileName, BleachSession session)
+      throws IOException, BleachException {
     File file = new File(uploadedFileName);
-    file.deleteOnExit();
 
     try (InputStream is = new BufferedInputStream(new FileInputStream(file))) {
-      File fstream = File.createTempFile("docbleach_", "");
-      fstream.deleteOnExit();
+      File fstream = session.createTempFile("docbleach_", ".tmp");
       try (FileOutputStream os = new FileOutputStream(fstream)) {
         session.sanitize(is, os);
         LOGGER.info(
@@ -149,6 +164,25 @@ public class Main extends AbstractVerticle {
             session.threatCount());
       }
       return fstream;
+    }
+  }
+
+  private static final class SanitizationResult {
+
+    private final BleachSession session;
+    private final File file;
+
+    private SanitizationResult(BleachSession session, File file) {
+      this.session = session;
+      this.file = file;
+    }
+
+    private BleachSession getSession() {
+      return session;
+    }
+
+    private File getFile() {
+      return file;
     }
   }
 }
